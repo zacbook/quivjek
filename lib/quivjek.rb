@@ -7,29 +7,58 @@ require "jekyll"
 require "front_matter_parser"
 require "yaml"
 
-Jekyll::Hooks.register :site, :after_init do |site|
+Jekyll::Hooks.register :site, :after_reset do |site|
+  # Changed to after_reset hook to so that jekyll serve regenerates
+  # quiver posts when quiver notebook is changed.
 
   if (ENV['APP_ENV'] != 'production')
     q = Quivjek.new(site)
-    q.load_posts_from_quiver
+    q.load_posts_from_quiver()
   end
 
 end
 
+
 class Quivjek
+  # Set reasonable defaults
+  NOTEBOOK_DIR = 'quiver.qvnotebook'
+  POST_DIR = '_posts/quiver'
+  IMG_DIR = 'images/quiver'
 
   def initialize( site )
-    self.showhelp('The qivjek plugin requires notebook_dir be set in your _config.yml file') unless site.config.key?('notebook_dir')
+
+    # Update config
+    site.config['notebook_dir'] = NOTEBOOK_DIR unless site.config['notebook_dir']
+    site.config['post_dir'] = POST_DIR unless site.config['post_dir']
+    site.config['img_dir'] = IMG_DIR unless site.config['img_dir']
+
+    # puts "#{site.config}"
+
+
+    self.showhelp('The quivjek plugin requires notebook_dir be set in your _config.yml file') unless site.config.key?('notebook_dir')
+
+    # puts "site.config"
+    # puts "#{site.config}"
+    # puts "#{site.config['test_package']}"
+    # puts "#{site.config['test_package']['setting1']}"
 
     @site         = site
     @jekyll_dir   = site.source
-    @notebook_dir = site.config['notebook_dir']
-    @post_dir     = File.join(@jekyll_dir, "/_posts/quiver")
-    @img_dir      = File.join(@jekyll_dir, "/images/q")
+    @notebook_dir = site.config.fetch('notebook_dir', NOTEBOOK_DIR)
+    @post_dir     = File.join(@jekyll_dir, site.config.fetch('post_dir', POST_DIR))
+    @img_dir     = File.join(@jekyll_dir, site.config.fetch('img_dir', POST_DIR))
 
   end
 
   def load_posts_from_quiver()
+
+    # The post_dir and img_dir must be excluded to avoid triggering a reset
+    # after writing the markdown files.
+    # The below ensures that neither post_dir nor img_dir are added multiple
+    # times
+    @site.exclude.push(@post_dir) unless @site.exclude.include?(@post_dir)
+    @site.exclude.push(@img_dir) unless @site.exclude.include?(@img_dir)
+
 
     Dir.mkdir(@post_dir) unless File.exists?(@post_dir)
     Dir.mkdir(@img_dir) unless File.exists?(@img_dir)
@@ -53,7 +82,7 @@ class Quivjek
 
   def copy_note(note_dir)
     # Load the quiver note meta.json file.
-    metajson = load_meta_json(note_dir)
+    metajson = self.load_meta_json(note_dir)
 
     # Skip this note if tagged with draft
     metajson["tags"].each do |tag|
@@ -65,7 +94,7 @@ class Quivjek
     self.copy_note_images(imagepath) if File.exist?(imagepath)
 
     # Load the quiver note content.json file and merge its cells.
-    contentjson = load_content_json(note_dir)
+    contentjson = self.load_content_json(note_dir)
     content     = self.merge_cells(contentjson, '')
 
     # Parse out optional frontmatter from the content
@@ -74,7 +103,7 @@ class Quivjek
     content     = parsed.content
 
     # Set some default frontmatter and combine with content
-    fm = set_default_frontmatter(fm, metajson)
+    fm = self.set_default_frontmatter(fm, metajson)
     output = fm.to_yaml + "---\n" + content
 
     # Write the markdown file to the jekyll dir
@@ -85,7 +114,7 @@ class Quivjek
 
   def load_meta_json(dir)
     metapath    = File.join(dir, "meta.json")
-    showhelp("meta.json doesn't exist") unless File.exist? metapath
+    self.showhelp("meta.json doesn't exist") unless File.exist? metapath
     metajson = JSON.parse(File.read(metapath))
 
     return metajson
@@ -93,7 +122,7 @@ class Quivjek
 
   def load_content_json(dir)
     contentpath = File.join(dir, "content.json")
-    showhelp(contentpath + "content.json doesn't exist") unless File.exist? contentpath
+    self.showhelp(contentpath + "content.json doesn't exist") unless File.exist? contentpath
     contentjson = JSON.parse(File.read(contentpath))
 
     return contentjson
@@ -121,9 +150,11 @@ class Quivjek
   end
 
   def set_default_frontmatter(fm, metajson)
+    # TODO: This should also set the layout of post if missing
 
     # If certain frontmatter is missing default to quiver metadata
     fm['title'] = metajson['title']      unless fm['title']
+    fm['layout'] = 'default' unless fm['layout']
 
     if !fm.key?("date")
       date = DateTime.strptime(metajson["created_at"].to_s, "%s")
@@ -131,7 +162,6 @@ class Quivjek
     end
 
     fm['tags']  = metajson["tags"]
-
     return fm
 
   end
@@ -158,15 +188,42 @@ class Quivjek
             File.rename(File.join(@img_dir, image[1]), File.join(@img_dir, image[0]))
           end
 
-          output << "#{c.gsub("quiver-image-url", "/images/q")}\n"
-        else
-          showhelp(frontmatter_title + " :all cells must be code or markdown types")
-      end
+          # This wants to use the img_dir, but not @img_dir, which is
+          # the full file path
+          # Should ideally use site.
+          output << "#{c.gsub("quiver-image-url", @site.config['img_dir'])}\n"
 
+
+        when "text"
+          # YOLO: just concatenate HTML data
+          # Put in a div indicating that markdown=0 for kramdown
+          # maybe have an 'if kramdown' block here...
+          # What should other parsers use?
+          output << '<div markdown="0">' + "\n"
+          output << "#{cell["data"]}" + "\n"
+          output << '<div><br /></div>' + "\n"
+          output << '</div>' + "\n"
+
+      when "latex"
+          output << '$$' + "\n"
+          output << "#{cell["data"]}" + "\n"
+          output << '$$' + "\n"
+
+
+        else
+          # This was broken because this is called before frontmatter was
+          # defined
+          # self.showhelp("all cells must be code or markdown types")
+
+          puts "Unsupported cell type: #{cell['type']}"
+          # puts "#{output}"
+
+
+      end
       output << "\n"
 
-      return output
     end
+    return output
   end
 
 end
